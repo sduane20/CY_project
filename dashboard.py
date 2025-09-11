@@ -1,135 +1,74 @@
 import streamlit as st
-import pandas as pd
-import plotly.express as px
-from helper import convert_types
-from helper import _convert_series
-from helper import build_address
-from helper import safe_mode
+import helper
 
 ############################################################################
-# data loading and preprocessing
+# PAGE CONFIGURATION & DATA LOADING
 ############################################################################
 
-# Load data
-data = pd.read_csv('Louisville_Metro_KY_-_Property_Foreclosures.csv')
-
-# Define data types for conversion
-data_types = [
-    int, str, str, str, int, int, str, int, str, str,
-    int, "datetime64[ns]", str, str, "datetime64[ns]", int, str, int
-]
-
-# Convert data types and build address
-data = convert_types(data, data_types)
-data = build_address(data)
-data["Action_Year"] = data["Action_Filed"].dt.year
-
-# Calculate year counts
-yr_counts = data["Action_Year"].value_counts().sort_index(ascending=False)
-
-############################################################################
-# dashboard creation
-############################################################################
 st.set_page_config(
     page_title="Foreclosures Dashboard",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# title
-st.markdown("# Foreclosures in Louisville, KY")
+# Load and preprocess data using the single helper function
+data = helper.load_and_preprocess_data(
+    'data/Louisville_Metro_KY_-_Property_Foreclosures.csv')
 
 ############################################################################
-# sidebar filters
+# SIDEBAR & FILTERING
 ############################################################################
 
-# defining side bar
 st.sidebar.header("Filters:")
 
-# placing filters in the sidebar using unique values.
-location = st.sidebar.multiselect(
+# Get filter options from the helper
+locations_options, year_options = helper.get_filter_options(data)
+
+# Create sidebar widgets
+selected_locations = st.sidebar.multiselect(
     "Select Location:",
-    options=data["Neighborhood"].dropna().unique(),
-    default=data["Neighborhood"].dropna().unique()
+    options=locations_options,
+    default=locations_options
 )
 
-# Sidebar filter for year
-years_sorted = pd.Series(data["Action_Year"].dropna().unique()).sort_values(ascending=False)
-
-year = st.sidebar.multiselect(
+selected_years = st.sidebar.multiselect(
     "Select Year:",
-    options=years_sorted,
-    default=years_sorted
+    options=year_options,
+    default=year_options
 )
 
-# Apply filters
-filtered_data = data[
-    (data["Neighborhood"].isin(location)) &
-    (data["Action_Year"].isin(year))
-]
+# Apply filters using the helper function
+filtered_data = helper.filter_data(data, selected_locations, selected_years)
 
 ############################################################################
-# top cards
+# DASHBOARD DISPLAY
 ############################################################################
 
-df = filtered_data.copy()
+st.markdown("# Foreclosures in Louisville, KY")
 
-# --- 1. Total foreclosures ---
-total_foreclosures = len(df)
+# --- Top Cards ---
+if not filtered_data.empty:
+    metrics = helper.calculate_metrics(filtered_data)
 
-# --- 2. Prepare Month columns if they exist ---
-if "Action_Filed" in df.columns:
-    df["Foreclosure_Month"] = pd.to_datetime(df["Action_Filed"], errors="coerce").dt.month_name()
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Total Foreclosures", f"{metrics['total_foreclosures']:,}")
+    col2.metric("Top Zip Code", metrics["popular_zip"])
+    col3.metric("Peak Filing Month", metrics["popular_foreclosure_month"])
+    col4.metric("Peak Sale Month", metrics["popular_sale_month"])
+    col5.metric("Top Purchaser", metrics["popular_purchaser"])
+
+    # --- Bar Chart ---
+    bar_chart_fig = helper.create_bar_chart(filtered_data)
+    st.plotly_chart(bar_chart_fig, use_container_width=True)
+
+    st.divider()
+
+    # --- Data Table ---
+    st.markdown("### Foreclosure Details")
+    display_df = helper.format_data_for_display(filtered_data)
+    st.dataframe(display_df, use_container_width=True)
+
 else:
-    df["Foreclosure_Month"] = pd.Series(dtype=str)
-
-if "Sale_Date" in df.columns:
-    df["Sale_Month"] = pd.to_datetime(df["Sale_Date"], errors="coerce").dt.month_name()
-else:
-    df["Sale_Month"] = pd.Series(dtype=str)
-
-popular_zip = safe_mode(df["Zip"])
-popular_foreclosure_month = safe_mode(df["Foreclosure_Month"])
-popular_sale_month = safe_mode(df["Sale_Month"])
-popular_purchaser = safe_mode(df["Purchaser"])
-
-# --- Layout with metrics ---
-with st.container():
-    col1, col2, col3, col4, col5 = st.columns([1,1,1,1,1])
-    col1.metric("Total Foreclosures", total_foreclosures)
-    col2.metric("Top Zip Code", popular_zip)
-    col3.metric("Peak Filing Month", popular_foreclosure_month)
-    col4.metric("Peak Sale Month", popular_sale_month)
-    col5.metric("Top Purchaser", popular_purchaser)
-
-############################################################################
-# bar chart
-############################################################################
-# plotting bar chart
-nei_counts = filtered_data.groupby("Neighborhood").size().reset_index(name="count")
-fig_count_location_type = px.bar(
-    nei_counts,
-    x="Neighborhood",
-    y="count",
-    title="Foreclosures by Neighborhood",
-    labels={"count": "Number of Foreclosures", "Neighborhood": "Neighborhood"},
-    color_discrete_sequence=["#0083B8"] * len(nei_counts),
-    template="plotly_white"
-)
-
-st.plotly_chart(fig_count_location_type, use_container_width=True)
-
-# dividing line
-st.divider()
-
-############################################################################
-# display table 
-############################################################################
-# Convert dates to MMDDYYYY format
-filtered_data['Action_Filed'] = pd.to_datetime(filtered_data['Action_Filed'], errors='coerce').dt.strftime('%m/%d/%Y')
-filtered_data['Sale_Date'] = pd.to_datetime(filtered_data['Sale_Date'], errors='coerce').dt.strftime('%m/%d/%Y')
-# Display selected columns in a clean format
-filtered_data = filtered_data[['Address', 'Zip', 'Neighborhood', 'Action_Filed', 'Case_Style', 'Sale_Date', 'Purchaser']]
-
-st.markdown("### Foreclosure Details")
-st.write(filtered_data)
+    st.warning(
+        "No data available for the selected filters. "
+        "Please adjust your selection.")
