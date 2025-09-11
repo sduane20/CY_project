@@ -31,3 +31,43 @@ def _convert_series(s, dtype):
         return s.astype("string")
     else:
         return s.astype(dtype)
+
+
+def build_address(data: pd.DataFrame) -> pd.DataFrame:
+    """Builds a clean Address column and drops unnecessary columns."""
+
+    # Fill NaNs in Dir
+    data["Dir"] = data["Dir"].fillna("")
+
+    # Build Address
+    data["Address"] = (
+        data["House_Nr"].astype(str).fillna("") + " " +
+        data["Dir"].astype(str) + " " +
+        data["Street_Name"].astype(str).fillna("") + " " +
+        data["St_Type"].astype(str).fillna("") + " " +
+        data["Zip"].astype(str).fillna("")
+    )
+
+    # Clean up spaces
+    data["Address"] = data["Address"].str.replace(
+        r"\s+", " ", regex=True).str.strip()
+
+    # Drop unwanted columns
+    drop_cols = ["House_Nr", "Dir", "Street_Name", "St_Type", "Post_Dir"]
+    data = data.drop(columns=[col for col in drop_cols if col in data.columns])
+
+    # Move Address to first column
+    cols = ["Address"] + [col for col in data.columns if col != "Address"]
+    data = data[cols]
+
+    # Convert type with your helper
+    data["Address"] = _convert_series(data["Address"], str)
+
+    return data
+
+
+def safe_mode(series, default="N/A"):
+    if series.empty:
+        return default
+    mode_vals = series.mode()
+    return mode_vals.iloc[0] if not mode_vals.empty else default
