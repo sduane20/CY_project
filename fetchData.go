@@ -8,16 +8,25 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time" // Import the time package for date handling
 )
 
 const (
 	url        = "https://services1.arcgis.com/79kfd2K6fskCAkyg/arcgis/rest/services/Louisville_Metro_KY_Property_Foreclosures/FeatureServer/0/query"
 	batchSize  = 1000
 	outputDir  = "data"
-	outputFile = "data.csv"
+	outputFile = "Louisville_Metro_KY_-_Property_Foreclosures.csv" // Renamed for clarity
 	workers    = 5
-	maxBatches = 300 // safety limit → 100 * 1000 = 100k rows max
+	maxBatches = 300 // safety limit → 300 * 1000 = 300k rows max
 )
+
+// --- DEFINED HEADERS FOR CSV ORDERING ---
+// This slice ensures the output CSV has the exact column order you need.
+var csvHeaders = []string{
+	"House_Nr", "Dir", "Street_Name", "St_Type", "Post_Dir", "Zip", "L_S", "CD",
+	"Neighborhood", "Full_Parcel_ID", "Census_Tract", "Action_Filed", "Case_",
+	"Case_Style", "Sale_Date", "Sale_Price", "Purchaser", "ObjectId",
+}
 
 type Feature struct {
 	Attributes map[string]interface{} `json:"attributes"`
@@ -25,6 +34,39 @@ type Feature struct {
 
 type QueryResult struct {
 	Features []Feature `json:"features"`
+}
+
+// formatValue handles converting API data into the correct CSV string format.
+// It specifically processes nil values and date timestamps.
+func formatValue(key string, value interface{}) string {
+	// 1. Handle nil values first, which appear as <nil>
+	if value == nil {
+		return ""
+	}
+
+	// 2. Check if the key corresponds to a date field
+	if key == "Action_Filed" || key == "Sale_Date" {
+		// The API returns timestamps as float64 (milliseconds)
+		if timestamp, ok := value.(float64); ok {
+			if timestamp == 0 {
+				return ""
+			}
+			// Convert milliseconds to seconds
+			sec := int64(timestamp / 1000)
+			// Create a time.Time object in UTC
+			t := time.Unix(sec, 0).UTC()
+			// Format to the desired layout: YYYY/MM/DD HH:MM:SS+00
+			return t.Format("2006/01/02 15:04:05+00")
+		}
+	}
+
+	// 3. For all other types, convert to a string
+	// Also handles the edge case where a value might literally be "<nil>"
+	s := fmt.Sprintf("%v", value)
+	if s == "<nil>" {
+		return ""
+	}
+	return s
 }
 
 func fetchBatch(offset int, client *http.Client) ([]map[string]interface{}, error) {
@@ -42,7 +84,7 @@ func fetchBatch(offset int, client *http.Client) ([]map[string]interface{}, erro
 	q.Add("resultRecordCount", strconv.Itoa(batchSize))
 	req.URL.RawQuery = q.Encode()
 
-	fmt.Println("Requesting:", req.URL.String())
+	// fmt.Println("Requesting:", req.URL.String()) // Uncomment for debugging
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -76,6 +118,8 @@ func main() {
 	offsets := make(chan int, workers)
 	var wg sync.WaitGroup
 
+	fmt.Println("Starting data fetch...")
+
 	// Worker goroutines
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -84,11 +128,14 @@ func main() {
 			for offset := range offsets {
 				records, err := fetchBatch(offset, client)
 				if err != nil {
-					fmt.Println("Error fetching offset", offset, ":", err)
+					fmt.Printf("Error fetching offset %d: %v\n", offset, err)
 					continue
 				}
 
 				if len(records) == 0 {
+					// This can happen normally when we reach the end of the data.
+					// To stop fetching once we hit an empty batch, you could add logic here
+					// to close the 'offsets' channel, but for a fixed maxBatches, this is fine.
 					continue
 				}
 
@@ -108,13 +155,16 @@ func main() {
 	// Wait for workers to finish
 	wg.Wait()
 
+	fmt.Printf("Fetched %d total records.\n", len(allData))
+
 	// Save to CSV
 	if len(allData) > 0 {
 		if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
 			panic(err)
 		}
 
-		file, err := os.Create(outputDir + "/" + outputFile)
+		filePath := outputDir + "/" + outputFile
+		file, err := os.Create(filePath)
 		if err != nil {
 			panic(err)
 		}
@@ -123,28 +173,28 @@ func main() {
 		writer := csv.NewWriter(file)
 		defer writer.Flush()
 
-		// Write headers
-		headers := []string{}
-		for key := range allData[0] {
-			headers = append(headers, key)
-		}
-		writer.Write(headers)
+		// --- MODIFIED CSV WRITING LOGIC ---
 
-		// Write rows
+		// 1. Write headers using the predefined ordered slice
+		if err := writer.Write(csvHeaders); err != nil {
+			panic(err)
+		}
+
+		// 2. Write rows, ensuring values are in the correct order
 		for _, record := range allData {
-			row := []string{}
-			for _, key := range headers {
-				if val, ok := record[key]; ok {
-					row = append(row, fmt.Sprintf("%v", val))
-				} else {
-					row = append(row, "")
-				}
+			row := make([]string, len(csvHeaders))
+			for i, key := range csvHeaders {
+				// Get value from map and format it using our new helper function
+				row[i] = formatValue(key, record[key])
 			}
-			writer.Write(row)
+			if err := writer.Write(row); err != nil {
+				// Log error but continue trying to write other rows
+				fmt.Printf("Error writing record to CSV: %v\n", err)
+			}
 		}
 
-		fmt.Println("✅ Data saved to", outputDir+"/"+outputFile)
+		fmt.Println("✅ Data saved to", filePath)
 	} else {
-		fmt.Println("⚠️ No data retrieved.")
+		fmt.Println("⚠️ No data was retrieved from the API.")
 	}
 }
